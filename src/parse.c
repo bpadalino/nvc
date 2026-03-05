@@ -7327,6 +7327,12 @@ static tree_t p_subprogram_specification(void)
    if (has_param_list) {
       p_formal_parameter_list(t, type);
       consume(tRPAREN);
+
+      if (standard() >= STD_19) {
+         const int nports = tree_ports(t);
+         for (int i = 0; i < nports; i++)
+            insert_name(nametab, tree_port(t, i), NULL);
+      }
    }
    else
       tree_set_flag(t, TREE_F_CALL_NO_ARGS);

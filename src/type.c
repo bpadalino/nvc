@@ -905,7 +905,7 @@ bool type_is_representable(type_t t)
 
 bool type_const_bounds(type_t t)
 {
-   if (type_is_unconstrained(t))
+   if (type_is_unconstrained(t) || type_kind(t) == T_GENERIC)
       return false;
    else if (type_is_record(t)) {
       const int nfields = type_fields(t);

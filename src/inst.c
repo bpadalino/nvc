@@ -278,15 +278,73 @@ void new_instance(tree_t *roots, int nroots, ident_t dotted,
    rename_mangled(&copy_ctx, dotted, prefixes, nprefix);
 }
 
+typedef struct {
+   hash_t *map;
+   tree_t  inst;
+   tree_t  generic_param;
+   type_t  generic_type;
+} fixup_ctx_t;
+
 static type_t rewrite_generic_types_cb(type_t type, void *__ctx)
 {
-   hash_t *map = __ctx;
-   return hash_get(map, type) ?: type;
+   fixup_ctx_t *ctx = __ctx;
+   return hash_get(ctx->map, type) ?: type;
+}
+
+static type_t subtype_for_unconstrained(tree_t param, type_t type)
+{
+   type_t sub = type_new(T_SUBTYPE);
+   type_set_base(sub, type_base_recur(type));
+
+   const loc_t *loc = tree_loc(param);
+
+   tree_t c = tree_new(T_CONSTRAINT);
+   tree_set_loc(c, loc);
+   tree_set_subkind(c, C_INDEX);
+   type_set_constraint(sub, c);
+
+   const int ndims = dimension_of(type);
+   for (int i = 0; i < ndims; i++) {
+      type_t itype = index_type_of(type, i);
+
+      tree_t ref = tree_new(T_REF);
+      tree_set_loc(ref, loc);
+      tree_set_ident(ref, tree_ident(param));
+      tree_set_ref(ref, param);
+      tree_set_type(ref, type);
+
+      tree_t rref = tree_new(T_ATTR_REF);
+      tree_set_loc(rref, loc);
+      tree_set_name(rref, ref);
+      tree_set_ident(rref, ident_new("RANGE"));
+      tree_set_subkind(rref, ATTR_RANGE);
+      tree_set_type(rref, itype);
+
+      if (i > 0) {
+         tree_t p = tree_new(T_LITERAL);
+         tree_set_subkind(p, L_INT);
+         tree_set_ival(p, i + 1);
+         tree_set_loc(p, loc);
+         tree_set_type(p, std_type(NULL, STD_UNIVERSAL_INTEGER));
+         add_param(rref, p, P_POS, NULL);
+      }
+
+      tree_t r = tree_new(T_RANGE);
+      tree_set_loc(r, loc);
+      tree_set_subkind(r, RANGE_EXPR);
+      tree_set_value(r, rref);
+      tree_set_type(r, itype);
+
+      tree_add_range(c, r);
+   }
+
+   return sub;
 }
 
 static tree_t instance_fixup_cb(tree_t t, void *__ctx)
 {
-   hash_t *map = __ctx;
+   fixup_ctx_t *ctx = __ctx;
+   hash_t *map = ctx->map;
 
    switch (tree_kind(t)) {
    case T_REF:
@@ -313,10 +371,16 @@ static tree_t instance_fixup_cb(tree_t t, void *__ctx)
    case T_CONST_DECL:
       {
          type_t type = tree_type(t);
-         if (type_is_unconstrained(type) && !tree_has_value(t))
-            error_at(tree_loc(t), "declaration of %s %s cannot have "
-                     "unconstrained type %s", class_str(class_of(t)),
-                     istr(tree_ident(t)), type_pp(type));
+         if (type_is_unconstrained(type) && !tree_has_value(t)) {
+            if (ctx->generic_param != NULL
+                && type_eq(ctx->generic_type, type))
+               tree_set_type(t, subtype_for_unconstrained(ctx->generic_param,
+                                                          type));
+            else
+               error_at(tree_loc(t), "declaration of %s %s cannot have "
+                        "unconstrained type %s", class_str(class_of(t)),
+                        istr(tree_ident(t)), type_pp(type));
+         }
       }
       break;
 
@@ -336,9 +400,30 @@ static void instance_hint_cb(diag_t *d, void *ctx)
 
 void instance_fixup(tree_t inst, hash_t *map)
 {
+   fixup_ctx_t ctx = { .map = map, .inst = inst };
+
+   const tree_kind_t inst_kind = tree_kind(inst);
+   if (inst_kind == T_FUNC_INST || inst_kind == T_PROC_INST
+       || inst_kind == T_FUNC_BODY || inst_kind == T_PROC_BODY
+       || inst_kind == T_FUNC_DECL || inst_kind == T_PROC_DECL) {
+      const int nports = tree_ports(inst);
+      for (int i = 0; i < nports && ctx.generic_param == NULL; i++) {
+         tree_t p = tree_port(inst, i);
+         type_t pt = tree_type(p);
+         if (type_kind(pt) == T_GENERIC) {
+            type_t actual = hash_get(map, pt);
+            if (actual != NULL && type_is_array(actual)
+                && type_is_unconstrained(actual)) {
+               ctx.generic_param = p;
+               ctx.generic_type  = actual;
+            }
+         }
+      }
+   }
+
    diag_add_hint_fn(instance_hint_cb, inst);
 
-   tree_rewrite(inst, NULL, instance_fixup_cb, rewrite_generic_types_cb, map);
+   tree_rewrite(inst, NULL, instance_fixup_cb, rewrite_generic_types_cb, &ctx);
 
    diag_remove_hint_fn(instance_hint_cb);
 }
